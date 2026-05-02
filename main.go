@@ -10,8 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
-	"runtime"
+	"sync"
 	"time"
 )
 
@@ -77,7 +76,45 @@ func transcribeWithMistral(audioData []byte, filename string) (string, error) {
 	return mistralResp.Text, nil
 }
 
+var (
+	activeRequests int
+	lastActivity   time.Time
+	mu             sync.Mutex
+)
+
+func startRequest() {
+	mu.Lock()
+	activeRequests++
+	mu.Unlock()
+}
+
+func endRequest() {
+	mu.Lock()
+	activeRequests--
+	lastActivity = time.Now()
+	mu.Unlock()
+}
+
+func idleMonitor() {
+	for {
+		time.Sleep(1 * time.Second)
+		mu.Lock()
+		requests := activeRequests
+		idle := time.Since(lastActivity)
+		mu.Unlock()
+
+		// Exit if no active requests and idle for > 5 seconds
+		if requests == 0 && idle > 5*time.Second {
+			fmt.Println("Idle timeout reached, shutting down.")
+			os.Exit(0)
+		}
+	}
+}
+
 func transcribeHandler(w http.ResponseWriter, r *http.Request) {
+	startRequest()
+	defer endRequest()
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -131,43 +168,15 @@ func transcribeHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func shutdownHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("shutting down"))
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		os.Exit(0)
-	}()
-}
-
-func watchTelegram() {
-	for {
-		time.Sleep(1 * time.Second)
-		if !isTelegramRunning() {
-			fmt.Println("Telegram is not running, shutting down.")
-			os.Exit(0)
-		}
-	}
-}
-
-func isTelegramRunning() bool {
-	if runtime.GOOS == "windows" {
-		cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq Telegram.exe", "/NH")
-		output, _ := cmd.Output()
-		return bytes.Contains(output, []byte("Telegram.exe"))
-	}
-	cmd := exec.Command("pgrep", "-x", "Telegram")
-	err := cmd.Run()
-	return err == nil
-}
-
 func main() {
 	port := "8988"
 
-	go watchTelegram()
+	mu.Lock()
+	lastActivity = time.Now()
+	mu.Unlock()
+	go idleMonitor()
 
 	http.HandleFunc("/transcribe", transcribeHandler)
-	http.HandleFunc("/shutdown", shutdownHandler)
 
 	listener, err := net.Listen("tcp", ":"+port)
 	if err != nil {
