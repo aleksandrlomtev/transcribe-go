@@ -10,15 +10,48 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
 
-const (
-	MistralAPIKey = ""
-	MistralURL    = "https://api.mistral.ai/v1/audio/transcriptions"
-	MistralModel  = "voxtral-mini-transcribe-2507"
-)
+type Config struct {
+	MistralAPIKey string `json:"mistral_api_key"`
+	MistralURL    string `json:"mistral_url"`
+	MistralModel  string `json:"mistral_model"`
+	Port          string `json:"port"`
+}
+
+var appConfig Config
+
+func loadConfig() {
+	appConfig = Config{
+		MistralAPIKey: "",
+		MistralURL:    "https://api.mistral.ai/v1/audio/transcriptions",
+		MistralModel:  "voxtral-mini-transcribe-2507",
+		Port:          "8988",
+	}
+
+	exePath, err := os.Executable()
+	if err != nil {
+		return
+	}
+
+	configPath := filepath.Join(filepath.Dir(exePath), "config.json")
+	file, err := os.Open(configPath)
+	if err == nil {
+		defer file.Close()
+		json.NewDecoder(file).Decode(&appConfig)
+	} else if os.IsNotExist(err) {
+		file, err = os.Create(configPath)
+		if err == nil {
+			defer file.Close()
+			encoder := json.NewEncoder(file)
+			encoder.SetIndent("", "  ")
+			encoder.Encode(appConfig)
+		}
+	}
+}
 
 type MistralResponse struct {
 	Text string `json:"text"`
@@ -32,7 +65,7 @@ func transcribeWithMistral(audioData []byte, filename string) (string, error) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
-	if err := writer.WriteField("model", MistralModel); err != nil {
+	if err := writer.WriteField("model", appConfig.MistralModel); err != nil {
 		return "", err
 	}
 
@@ -48,12 +81,12 @@ func transcribeWithMistral(audioData []byte, filename string) (string, error) {
 		return "", err
 	}
 
-	req, err := http.NewRequest("POST", MistralURL, body)
+	req, err := http.NewRequest("POST", appConfig.MistralURL, body)
 	if err != nil {
 		return "", err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+MistralAPIKey)
+	req.Header.Set("Authorization", "Bearer "+appConfig.MistralAPIKey)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	client := &http.Client{}
@@ -169,7 +202,8 @@ func transcribeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	port := "8988"
+	loadConfig()
+	port := appConfig.Port
 
 	mu.Lock()
 	lastActivity = time.Now()
@@ -185,7 +219,7 @@ func main() {
 	}
 
 	fmt.Printf("Starting transcription server on port %s...\n", port)
-	fmt.Printf("Using Mistral model: %s\n", MistralModel)
+	fmt.Printf("Using Mistral model: %s\n", appConfig.MistralModel)
 
 	if err := http.Serve(listener, nil); err != nil {
 		fmt.Printf("Error starting server: %v\n", err)
