@@ -6,9 +6,13 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	"runtime"
+	"time"
 )
 
 const (
@@ -29,12 +33,10 @@ func transcribeWithMistral(audioData []byte, filename string) (string, error) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
-	// Add model field
 	if err := writer.WriteField("model", MistralModel); err != nil {
 		return "", err
 	}
 
-	// Add file field
 	part, err := writer.CreateFormFile("file", filename)
 	if err != nil {
 		return "", err
@@ -129,14 +131,54 @@ func transcribeHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func shutdownHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("shutting down"))
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		os.Exit(0)
+	}()
+}
+
+func watchTelegram() {
+	for {
+		time.Sleep(1 * time.Second)
+		if !isTelegramRunning() {
+			fmt.Println("Telegram is not running, shutting down.")
+			os.Exit(0)
+		}
+	}
+}
+
+func isTelegramRunning() bool {
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq Telegram.exe", "/NH")
+		output, _ := cmd.Output()
+		return bytes.Contains(output, []byte("Telegram.exe"))
+	}
+	cmd := exec.Command("pgrep", "-x", "Telegram")
+	err := cmd.Run()
+	return err == nil
+}
+
 func main() {
 	port := "8988"
+
+	go watchTelegram()
+
 	http.HandleFunc("/transcribe", transcribeHandler)
+	http.HandleFunc("/shutdown", shutdownHandler)
+
+	listener, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		fmt.Printf("Port %s is already in use, exiting.\n", port)
+		os.Exit(0)
+	}
 
 	fmt.Printf("Starting transcription server on port %s...\n", port)
 	fmt.Printf("Using Mistral model: %s\n", MistralModel)
 
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	if err := http.Serve(listener, nil); err != nil {
 		fmt.Printf("Error starting server: %v\n", err)
 		os.Exit(1)
 	}
